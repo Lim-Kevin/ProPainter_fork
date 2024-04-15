@@ -11,12 +11,12 @@ from tqdm import tqdm
 import torch
 import torchvision
 
-from model.modules.flow_comp_raft import RAFT_bi
-from model.recurrent_flow_completion import RecurrentFlowCompleteNet
-from model.propainter import InpaintGenerator
-from utils.download_util import load_file_from_url
-from core.utils import to_tensors
-from model.misc import get_device
+from .model.modules.flow_comp_raft import RAFT_bi
+from .model.recurrent_flow_completion import RecurrentFlowCompleteNet
+from .model.propainter import InpaintGenerator
+from .utils.download_util import load_file_from_url
+from .core.utils import to_tensors
+from .model.misc import get_device
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -174,91 +174,57 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
 
 
 
-if __name__ == '__main__':
+def inpaint(video_path, mask_path, output_folder, fps):
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = get_device()
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '-i', '--video', type=str, default='inputs/object_removal/bmx-trees', help='Path of the input video or image folder.')
-    parser.add_argument(
-        '-m', '--mask', type=str, default='inputs/object_removal/bmx-trees_mask', help='Path of the mask(s) or mask folder.')
-    parser.add_argument(
-        '-o', '--output', type=str, default='results', help='Output folder. Default: results')
-    parser.add_argument(
-        "--resize_ratio", type=float, default=1.0, help='Resize scale for processing video.')
-    parser.add_argument(
-        '--height', type=int, default=-1, help='Height of the processing video.')
-    parser.add_argument(
-        '--width', type=int, default=-1, help='Width of the processing video.')
-    parser.add_argument(
-        '--mask_dilation', type=int, default=4, help='Mask dilation for video and flow masking.')
-    parser.add_argument(
-        "--ref_stride", type=int, default=10, help='Stride of global reference frames.')
-    parser.add_argument(
-        "--neighbor_length", type=int, default=10, help='Length of local neighboring frames.')
-    parser.add_argument(
-        "--subvideo_length", type=int, default=80, help='Length of sub-video for long video inference.')
-    parser.add_argument(
-        "--raft_iter", type=int, default=20, help='Iterations for RAFT inference.')
-    parser.add_argument(
-        '--mode', default='video_inpainting', choices=['video_inpainting', 'video_outpainting'], help="Modes: video_inpainting / video_outpainting")
-    parser.add_argument(
-        '--scale_h', type=float, default=1.0, help='Outpainting scale of height for video_outpainting mode.')
-    parser.add_argument(
-        '--scale_w', type=float, default=1.2, help='Outpainting scale of width for video_outpainting mode.')
-    parser.add_argument(
-        '--save_fps', type=int, default=24, help='Frame per second. Default: 24')
-    parser.add_argument(
-        '--save_frames', action='store_true', help='Save output frames. Default: False')
-    parser.add_argument(
-        '--fp16', action='store_true', help='Use fp16 (half precision) during inference. Default: fp32 (single precision).')
 
-    args = parser.parse_args()
+    # Set arguments
+    video = video_path
+    mask = mask_path
+    output = output_folder
+    save_fps = float(fps)
+
+    resize_ratio = 1.0
+    height = -1
+    width = -1
+    mask_dilation = 4
+    ref_stride = 10
+    neighbor_length = 10
+    subvideo_length = 80
+    raft_iter = 20
+    mode = 'video_inpainting'
+    scale_h = 1.0
+    scale_w = 1.2
+    fp16 = False
 
     # Use fp16 precision during inference to reduce running memory cost
-    use_half = True if args.fp16 else False 
+    use_half = True if fp16 else False 
     if device == torch.device('cpu'):
         use_half = False
 
-    frames, fps, size, video_name = read_frame_from_videos(args.video)
-    if not args.width == -1 and not args.height == -1:
-        size = (args.width, args.height)
-    if not args.resize_ratio == 1.0:
-        size = (int(args.resize_ratio * size[0]), int(args.resize_ratio * size[1]))
+    frames, fps, size, video_name = read_frame_from_videos(video)
+    if not width == -1 and not height == -1:
+        size = (width, height)
+    if not resize_ratio == 1.0:
+        size = (int(resize_ratio * size[0]), int(resize_ratio * size[1]))
 
     frames, size, out_size = resize_frames(frames, size)
-    
-    fps = args.save_fps if fps is None else fps
-    save_root = os.path.join(args.output, video_name)
-    if not os.path.exists(save_root):
-        os.makedirs(save_root, exist_ok=True)
+    fps = save_fps if fps is None else fps
+    if not os.path.exists(output):
+        os.makedirs(output, exist_ok=True)
 
-    if args.mode == 'video_inpainting':
+    if mode == 'video_inpainting':
         frames_len = len(frames)
-        flow_masks, masks_dilated = read_mask(args.mask, frames_len, size, 
-                                              flow_mask_dilates=args.mask_dilation,
-                                              mask_dilates=args.mask_dilation)
+        flow_masks, masks_dilated = read_mask(mask, frames_len, size, 
+                                              flow_mask_dilates=mask_dilation,
+                                              mask_dilates=mask_dilation)
         w, h = size
-    elif args.mode == 'video_outpainting':
-        assert args.scale_h is not None and args.scale_w is not None, 'Please provide a outpainting scale (s_h, s_w).'
-        frames, flow_masks, masks_dilated, size = extrapolation(frames, (args.scale_h, args.scale_w))
+    elif mode == 'video_outpainting':
+        assert scale_h is not None and scale_w is not None, 'Please provide a outpainting scale (s_h, s_w).'
+        frames, flow_masks, masks_dilated, size = extrapolation(frames, (scale_h, scale_w))
         w, h = size
     else:
         raise NotImplementedError
-    
-    # for saving the masked frames or video
-    masked_frame_for_save = []
-    for i in range(len(frames)):
-        mask_ = np.expand_dims(np.array(masks_dilated[i]),2).repeat(3, axis=2)/255.
-        img = np.array(frames[i])
-        green = np.zeros([h, w, 3]) 
-        green[:,:,1] = 255
-        alpha = 0.6
-        # alpha = 1.0
-        fuse_img = (1-alpha)*img + alpha*green
-        fuse_img = mask_ * fuse_img + (1-mask_)*img
-        masked_frame_for_save.append(fuse_img.astype(np.uint8))
 
     frames_inp = [np.array(f).astype(np.uint8) for f in frames]
     frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
@@ -270,12 +236,10 @@ if __name__ == '__main__':
     ##############################################
     # set up RAFT and flow competition model
     ##############################################
-    ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'raft-things.pth'), 
-                                    model_dir='weights', progress=True, file_name=None)
+    ckpt_path = 'saves/raft_things.pth'
     fix_raft = RAFT_bi(ckpt_path, device)
     
-    ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'recurrent_flow_completion.pth'), 
-                                    model_dir='weights', progress=True, file_name=None)
+    ckpt_path = 'saves/recurrent_flow_completion.pth'
     fix_flow_complete = RecurrentFlowCompleteNet(ckpt_path)
     for p in fix_flow_complete.parameters():
         p.requires_grad = False
@@ -286,8 +250,7 @@ if __name__ == '__main__':
     ##############################################
     # set up ProPainter model
     ##############################################
-    ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'ProPainter.pth'), 
-                                    model_dir='weights', progress=True, file_name=None)
+    ckpt_path = 'saves/ProPainter.pth'
     model = InpaintGenerator(model_path=ckpt_path).to(device)
     model.eval()
 
@@ -314,9 +277,9 @@ if __name__ == '__main__':
             for f in range(0, video_length, short_clip_len):
                 end_f = min(video_length, f + short_clip_len)
                 if f == 0:
-                    flows_f, flows_b = fix_raft(frames[:,f:end_f], iters=args.raft_iter)
+                    flows_f, flows_b = fix_raft(frames[:,f:end_f], iters=raft_iter)
                 else:
-                    flows_f, flows_b = fix_raft(frames[:,f-1:end_f], iters=args.raft_iter)
+                    flows_f, flows_b = fix_raft(frames[:,f-1:end_f], iters=raft_iter)
                 
                 gt_flows_f_list.append(flows_f)
                 gt_flows_b_list.append(flows_b)
@@ -326,7 +289,7 @@ if __name__ == '__main__':
             gt_flows_b = torch.cat(gt_flows_b_list, dim=1)
             gt_flows_bi = (gt_flows_f, gt_flows_b)
         else:
-            gt_flows_bi = fix_raft(frames, iters=args.raft_iter)
+            gt_flows_bi = fix_raft(frames, iters=raft_iter)
             torch.cuda.empty_cache()
 
 
@@ -339,14 +302,14 @@ if __name__ == '__main__':
         
         # ---- complete flow ----
         flow_length = gt_flows_bi[0].size(1)
-        if flow_length > args.subvideo_length:
+        if flow_length > subvideo_length:
             pred_flows_f, pred_flows_b = [], []
             pad_len = 5
-            for f in range(0, flow_length, args.subvideo_length):
+            for f in range(0, flow_length, subvideo_length):
                 s_f = max(0, f - pad_len)
-                e_f = min(flow_length, f + args.subvideo_length + pad_len)
+                e_f = min(flow_length, f + subvideo_length + pad_len)
                 pad_len_s = max(0, f) - s_f
-                pad_len_e = e_f - min(flow_length, f + args.subvideo_length)
+                pad_len_e = e_f - min(flow_length, f + subvideo_length)
                 pred_flows_bi_sub, _ = fix_flow_complete.forward_bidirect_flow(
                     (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]), 
                     flow_masks[:, s_f:e_f+1])
@@ -370,7 +333,7 @@ if __name__ == '__main__':
 
         # ---- image propagation ----
         masked_frames = frames * (1 - masks_dilated)
-        subvideo_length_img_prop = min(100, args.subvideo_length) # ensure a minimum of 100 frames for image propagation
+        subvideo_length_img_prop = min(100, subvideo_length) # ensure a minimum of 100 frames for image propagation
         if video_length > subvideo_length_img_prop:
             updated_frames, updated_masks = [], []
             pad_len = 10
@@ -407,9 +370,9 @@ if __name__ == '__main__':
     ori_frames = frames_inp
     comp_frames = [None] * video_length
 
-    neighbor_stride = args.neighbor_length // 2
-    if video_length > args.subvideo_length:
-        ref_num = args.subvideo_length // args.ref_stride
+    neighbor_stride = neighbor_length // 2
+    if video_length > subvideo_length:
+        ref_num = subvideo_length // ref_stride
     else:
         ref_num = -1
     
@@ -419,7 +382,7 @@ if __name__ == '__main__':
             i for i in range(max(0, f - neighbor_stride),
                                 min(video_length, f + neighbor_stride + 1))
         ]
-        ref_ids = get_ref_index(f, neighbor_ids, video_length, args.ref_stride, ref_num)
+        ref_ids = get_ref_index(f, neighbor_ids, video_length, ref_stride, ref_num)
         selected_imgs = updated_frames[:, neighbor_ids + ref_ids, :, :, :]
         selected_masks = masks_dilated[:, neighbor_ids + ref_ids, :, :, :]
         selected_update_masks = updated_masks[:, neighbor_ids + ref_ids, :, :, :]
@@ -452,25 +415,20 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
                 
     # save each frame
-    if args.save_frames:
-        for idx in range(video_length):
-            f = comp_frames[idx]
-            f = cv2.resize(f, out_size, interpolation = cv2.INTER_CUBIC)
-            f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-            img_save_root = os.path.join(save_root, 'frames', str(idx).zfill(4)+'.png')
-            imwrite(f, img_save_root)
+    for idx in range(video_length):
+        f = comp_frames[idx]
+        f = cv2.resize(f, out_size, interpolation = cv2.INTER_CUBIC)
+        f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
+        img_output = os.path.join(output, 'frames', str(idx).zfill(5)+'.png')
+        imwrite(f, img_output)
                     
 
-    # if args.mode == 'video_outpainting':
+    # if mode == 'video_outpainting':
     #     comp_frames = [i[10:-10,10:-10] for i in comp_frames]
     #     masked_frame_for_save = [i[10:-10,10:-10] for i in masked_frame_for_save]
     
     # save videos frame
-    masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
-    comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
-    imageio.mimwrite(os.path.join(save_root, 'masked_in.mp4'), masked_frame_for_save, fps=fps, quality=7)
-    imageio.mimwrite(os.path.join(save_root, 'inpaint_out.mp4'), comp_frames, fps=fps, quality=7)
-    
-    print(f'\nAll results are saved in {save_root}')
+    # comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
+    # imageio.mimwrite(os.path.join(output, 'inpainted.mp4'), comp_frames, fps=fps, quality=7)
     
     torch.cuda.empty_cache()
