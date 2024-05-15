@@ -419,7 +419,7 @@ def inpaint(video_path, mask_path, output_folder, fps):
         f = comp_frames[idx]
         f = cv2.resize(f, out_size, interpolation = cv2.INTER_CUBIC)
         f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-        img_output = os.path.join(output, 'frames', str(idx).zfill(5)+'.png')
+        img_output = os.path.join(output, str(idx).zfill(5)+'.png')
         imwrite(f, img_output)
                     
 
