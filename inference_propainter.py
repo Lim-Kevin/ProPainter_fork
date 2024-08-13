@@ -174,15 +174,15 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
 
 
 
-def inpaint(video_path, mask_path, output_folder, fps):
+def inpaint(video_path, mask_path, output_folder):
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = get_device()
+    # device = get_device()
+    device = torch.device('cuda:0')
 
     # Set arguments
     video = video_path
     mask = mask_path
     output = output_folder
-    save_fps = float(fps)
 
     resize_ratio = 1.0
     height = -1
@@ -194,7 +194,7 @@ def inpaint(video_path, mask_path, output_folder, fps):
     raft_iter = 20
     mode = 'video_inpainting'
     scale_h = 1.0
-    scale_w = 1.2
+    scale_w = 1.0
     fp16 = False
 
     # Use fp16 precision during inference to reduce running memory cost
@@ -209,7 +209,6 @@ def inpaint(video_path, mask_path, output_folder, fps):
         size = (int(resize_ratio * size[0]), int(resize_ratio * size[1]))
 
     frames, size, out_size = resize_frames(frames, size)
-    fps = save_fps if fps is None else fps
     if not os.path.exists(output):
         os.makedirs(output, exist_ok=True)
 
@@ -259,7 +258,7 @@ def inpaint(video_path, mask_path, output_folder, fps):
     # ProPainter inference
     ##############################################
     video_length = frames.size(1)
-    print(f'\nProcessing: {video_name} [{video_length} frames]...')
+    print(f'Processing: {video_name} [{video_length} frames]...')
     with torch.no_grad():
         # ---- compute flow ----
         if frames.size(-1) <= 640: 
