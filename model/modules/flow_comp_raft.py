@@ -43,8 +43,6 @@ class RAFT_bi(nn.Module):
         with torch.no_grad():
             gtlf_1 = gt_local_frames[:, :-1, :, :, :].reshape(-1, c, h, w)
             gtlf_2 = gt_local_frames[:, 1:, :, :, :].reshape(-1, c, h, w)
-            # print(gtlf_1.shape)
-
             _, gt_flows_forward = self.fix_raft(gtlf_1, gtlf_2, iters=iters, test_mode=True)
             _, gt_flows_backward = self.fix_raft(gtlf_2, gtlf_1, iters=iters, test_mode=True)
 

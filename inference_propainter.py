@@ -19,9 +19,67 @@ from .core.utils import to_tensors
 from .model.misc import get_device
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
+
+
+def find_bounding_box(img_list, padding=10):
+    """
+    Finds a slightly larger bounding box given a list of images
+    :param img_list: List of images
+    :param padding: Space around bounding box in px
+    :return: top left and bottom right coordinates of the bounding box plus padding
+    """
+    top_left = None
+    bottom_right = None
+
+    width = 0
+    height = 0
+    # Iterate over all images to find the bounding box
+    for img in img_list:
+        width, height = img.size
+        pixels = img.load()
+
+        for y in range(height):
+            for x in range(width):
+                if pixels[x, y] != (0, 0, 0, 0):  # Check if the pixel is not black
+                    # Update top_left
+                    if top_left is None:
+                        top_left = (x, y)
+                    else:
+                        top_left = (min(top_left[0], x), min(top_left[1], y))
+
+                    # Update bottom_right
+                    if bottom_right is None:
+                        bottom_right = (x, y)
+                    else:
+                        bottom_right = (max(bottom_right[0], x), max(bottom_right[1], y))
+
+    # Add padding
+    top_left = (max(0, top_left[0] - padding), max(0, top_left[1] - padding))
+    bottom_right = (min(width - 1, bottom_right[0] + padding), min(height - 1, bottom_right[1] + padding))
+
+    return top_left, bottom_right
+
+
+def crop_images(img_list, top_left, bottom_right):
+    """
+    Crops a list of images
+    :param img_list: List of images
+    :param top_left: Top left coordinate of the rectangle
+    :param bottom_right: Bottom right coordinate of the rectangle
+    :return crop_images: A list of cropped images
+    """
+    cropped_images = []
+    for img in img_list:
+        cropped_img = img.crop((*top_left, bottom_right[0] + 1, bottom_right[1] + 1))
+        cropped_images.append(cropped_img)
+    out_size = cropped_images[0].size
+    cropped_images, process_size = resize_frames(cropped_images)
+    return cropped_images, process_size, out_size
+
 
 def imwrite(img, file_path, params=None, auto_mkdir=True):
     if auto_mkdir:
@@ -31,25 +89,32 @@ def imwrite(img, file_path, params=None, auto_mkdir=True):
 
 
 # resize frames
-def resize_frames(frames, size=None):    
+def resize_frames(frames, size=None, min_size=150):
     if size is not None:
         out_size = size
-        process_size = (out_size[0]-out_size[0]%8, out_size[1]-out_size[1]%8)
+        process_size = (out_size[0] - out_size[0] % 8, out_size[1] - out_size[1] % 8)
         frames = [f.resize(process_size) for f in frames]
     else:
         out_size = frames[0].size
-        process_size = (out_size[0]-out_size[0]%8, out_size[1]-out_size[1]%8)
+        # Ensure that frames are at least min_size
+        min_side = min(out_size[0], out_size[1])
+        if min_side < min_size:
+            scale = min_size / min_side
+            w = int(scale * out_size[0])
+            h = int(scale * out_size[1])
+            out_size = (w, h)
+
+        process_size = (out_size[0] - out_size[0] % 8, out_size[1] - out_size[1] % 8)
         if not out_size == process_size:
             frames = [f.resize(process_size) for f in frames]
-        
-    return frames, process_size, out_size
+    return frames, process_size
 
 
 #  read frames from video
 def read_frame_from_videos(frame_root):
-    if frame_root.endswith(('mp4', 'mov', 'avi', 'MP4', 'MOV', 'AVI')): # input video path
+    if frame_root.endswith(('mp4', 'mov', 'avi', 'MP4', 'MOV', 'AVI')):  # input video path
         video_name = os.path.basename(frame_root)[:-4]
-        vframes, aframes, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec') # RGB
+        vframes, aframes, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec')  # RGB
         frames = list(vframes.numpy())
         frames = [Image.fromarray(f) for f in frames]
         fps = info['video_fps']
@@ -68,24 +133,27 @@ def read_frame_from_videos(frame_root):
 
 
 def binary_mask(mask, th=0.1):
-    mask[mask>th] = 1
-    mask[mask<=th] = 0
+    mask[mask > th] = 1
+    mask[mask <= th] = 0
     return mask
-  
-  
+
+
 # read frame-wise masks
-def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
+def read_mask(mpath, length, flow_mask_dilates=8, mask_dilates=5):
     masks_img = []
     masks_dilated = []
     flow_masks = []
-    
-    if mpath.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')): # input single img path
-       masks_img = [Image.open(mpath)]
-    else:  
+
+    if mpath.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')):  # input single img path
+        masks_img = [Image.open(mpath)]
+    else:
         mnames = sorted(os.listdir(mpath))
         for mp in mnames:
             masks_img.append(Image.open(os.path.join(mpath, mp)))
-          
+
+    # Resizing masks to bounding box
+    top_left, bottom_right = find_bounding_box(masks_img)
+    masks_img, size, out_size = crop_images(masks_img, top_left, bottom_right)
     for mask_img in masks_img:
         if size is not None:
             mask_img = mask_img.resize(size, Image.NEAREST)
@@ -100,18 +168,18 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         # flow_mask_img = cv2.morphologyEx(flow_mask_img, cv2.MORPH_CLOSE, np.ones((21, 21),np.uint8)).astype(bool)
         # flow_mask_img = scipy.ndimage.binary_fill_holes(flow_mask_img).astype(np.uint8)
         flow_masks.append(Image.fromarray(flow_mask_img * 255))
-        
+
         if mask_dilates > 0:
             mask_img = scipy.ndimage.binary_dilation(mask_img, iterations=mask_dilates).astype(np.uint8)
         else:
             mask_img = binary_mask(mask_img).astype(np.uint8)
         masks_dilated.append(Image.fromarray(mask_img * 255))
-    
+
     if len(masks_img) == 1:
         flow_masks = flow_masks * length
         masks_dilated = masks_dilated * length
 
-    return flow_masks, masks_dilated
+    return flow_masks, masks_dilated, top_left, bottom_right, size, out_size
 
 
 def extrapolation(video_ori, scale):
@@ -138,21 +206,21 @@ def extrapolation(video_ori, scale):
     # Generates the mask for missing region.
     masks_dilated = []
     flow_masks = []
-    
+
     dilate_h = 4 if H_start > 10 else 0
     dilate_w = 4 if W_start > 10 else 0
     mask = np.ones(((imgH_extr, imgW_extr)), dtype=np.uint8)
-    
-    mask[H_start+dilate_h: H_start+imgH-dilate_h, 
-         W_start+dilate_w: W_start+imgW-dilate_w] = 0
+
+    mask[H_start + dilate_h: H_start + imgH - dilate_h,
+    W_start + dilate_w: W_start + imgW - dilate_w] = 0
     flow_masks.append(Image.fromarray(mask * 255))
 
-    mask[H_start: H_start+imgH, W_start: W_start+imgW] = 0
+    mask[H_start: H_start + imgH, W_start: W_start + imgW] = 0
     masks_dilated.append(Image.fromarray(mask * 255))
-  
+
     flow_masks = flow_masks * nFrame
     masks_dilated = masks_dilated * nFrame
-    
+
     return frames, flow_masks, masks_dilated, (imgW_extr, imgH_extr)
 
 
@@ -173,7 +241,6 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
     return ref_index
 
 
-
 def inpaint(video_path, mask_path, output_folder):
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = get_device()
@@ -183,6 +250,8 @@ def inpaint(video_path, mask_path, output_folder):
     video = video_path
     mask = mask_path
     output = output_folder
+
+    os.makedirs(output, exist_ok=True)
 
     resize_ratio = 1.0
     height = -1
@@ -198,25 +267,27 @@ def inpaint(video_path, mask_path, output_folder):
     fp16 = False
 
     # Use fp16 precision during inference to reduce running memory cost
-    use_half = True if fp16 else False 
+    use_half = True if fp16 else False
     if device == torch.device('cpu'):
         use_half = False
 
     frames, fps, size, video_name = read_frame_from_videos(video)
+    out_frames = frames
     if not width == -1 and not height == -1:
         size = (width, height)
     if not resize_ratio == 1.0:
         size = (int(resize_ratio * size[0]), int(resize_ratio * size[1]))
+    # frames, size, out_size = resize_frames(frames, size)
 
-    frames, size, out_size = resize_frames(frames, size)
     if not os.path.exists(output):
         os.makedirs(output, exist_ok=True)
-
     if mode == 'video_inpainting':
         frames_len = len(frames)
-        flow_masks, masks_dilated = read_mask(mask, frames_len, size, 
-                                              flow_mask_dilates=mask_dilation,
-                                              mask_dilates=mask_dilation)
+        flow_masks, masks_dilated, top_left, bottom_right, size, out_size = read_mask(mask, frames_len,
+                                                                                      flow_mask_dilates=mask_dilation,
+                                                                                      mask_dilates=mask_dilation)
+        frames, _, _ = crop_images(frames, top_left, bottom_right)
+        frames, _ = resize_frames(frames, size)
         w, h = size
     elif mode == 'video_outpainting':
         assert scale_h is not None and scale_w is not None, 'Please provide a outpainting scale (s_h, s_w).'
@@ -226,25 +297,23 @@ def inpaint(video_path, mask_path, output_folder):
         raise NotImplementedError
 
     frames_inp = [np.array(f).astype(np.uint8) for f in frames]
-    frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
+    frames = to_tensors()(frames).unsqueeze(0) * 2 - 1
     flow_masks = to_tensors()(flow_masks).unsqueeze(0)
     masks_dilated = to_tensors()(masks_dilated).unsqueeze(0)
     frames, flow_masks, masks_dilated = frames.to(device), flow_masks.to(device), masks_dilated.to(device)
 
-    
     ##############################################
     # set up RAFT and flow competition model
     ##############################################
     ckpt_path = 'saves/raft_things.pth'
     fix_raft = RAFT_bi(ckpt_path, device)
-    
+
     ckpt_path = 'saves/recurrent_flow_completion.pth'
     fix_flow_complete = RecurrentFlowCompleteNet(ckpt_path)
     for p in fix_flow_complete.parameters():
         p.requires_grad = False
     fix_flow_complete.to(device)
     fix_flow_complete.eval()
-
 
     ##############################################
     # set up ProPainter model
@@ -253,7 +322,6 @@ def inpaint(video_path, mask_path, output_folder):
     model = InpaintGenerator(model_path=ckpt_path).to(device)
     model.eval()
 
-    
     ##############################################
     # ProPainter inference
     ##############################################
@@ -261,29 +329,29 @@ def inpaint(video_path, mask_path, output_folder):
     print(f'Processing: {video_name} [{video_length} frames]...')
     with torch.no_grad():
         # ---- compute flow ----
-        if frames.size(-1) <= 640: 
+        if frames.size(-1) <= 640:
             short_clip_len = 12
-        elif frames.size(-1) <= 720: 
+        elif frames.size(-1) <= 720:
             short_clip_len = 8
         elif frames.size(-1) <= 1280:
             short_clip_len = 4
         else:
             short_clip_len = 2
-        
+
         # use fp32 for RAFT
         if frames.size(1) > short_clip_len:
             gt_flows_f_list, gt_flows_b_list = [], []
             for f in range(0, video_length, short_clip_len):
                 end_f = min(video_length, f + short_clip_len)
                 if f == 0:
-                    flows_f, flows_b = fix_raft(frames[:,f:end_f], iters=raft_iter)
+                    flows_f, flows_b = fix_raft(frames[:, f:end_f], iters=raft_iter)
                 else:
-                    flows_f, flows_b = fix_raft(frames[:,f-1:end_f], iters=raft_iter)
-                
+                    flows_f, flows_b = fix_raft(frames[:, f - 1:end_f], iters=raft_iter)
+
                 gt_flows_f_list.append(flows_f)
                 gt_flows_b_list.append(flows_b)
                 torch.cuda.empty_cache()
-                
+
             gt_flows_f = torch.cat(gt_flows_f_list, dim=1)
             gt_flows_b = torch.cat(gt_flows_b_list, dim=1)
             gt_flows_bi = (gt_flows_f, gt_flows_b)
@@ -291,14 +359,12 @@ def inpaint(video_path, mask_path, output_folder):
             gt_flows_bi = fix_raft(frames, iters=raft_iter)
             torch.cuda.empty_cache()
 
-
         if use_half:
             frames, flow_masks, masks_dilated = frames.half(), flow_masks.half(), masks_dilated.half()
             gt_flows_bi = (gt_flows_bi[0].half(), gt_flows_bi[1].half())
             fix_flow_complete = fix_flow_complete.half()
             model = model.half()
 
-        
         # ---- complete flow ----
         flow_length = gt_flows_bi[0].size(1)
         if flow_length > subvideo_length:
@@ -310,17 +376,17 @@ def inpaint(video_path, mask_path, output_folder):
                 pad_len_s = max(0, f) - s_f
                 pad_len_e = e_f - min(flow_length, f + subvideo_length)
                 pred_flows_bi_sub, _ = fix_flow_complete.forward_bidirect_flow(
-                    (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]), 
-                    flow_masks[:, s_f:e_f+1])
+                    (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]),
+                    flow_masks[:, s_f:e_f + 1])
                 pred_flows_bi_sub = fix_flow_complete.combine_flow(
-                    (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]), 
-                    pred_flows_bi_sub, 
-                    flow_masks[:, s_f:e_f+1])
+                    (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]),
+                    pred_flows_bi_sub,
+                    flow_masks[:, s_f:e_f + 1])
 
-                pred_flows_f.append(pred_flows_bi_sub[0][:, pad_len_s:e_f-s_f-pad_len_e])
-                pred_flows_b.append(pred_flows_bi_sub[1][:, pad_len_s:e_f-s_f-pad_len_e])
+                pred_flows_f.append(pred_flows_bi_sub[0][:, pad_len_s:e_f - s_f - pad_len_e])
+                pred_flows_b.append(pred_flows_bi_sub[1][:, pad_len_s:e_f - s_f - pad_len_e])
                 torch.cuda.empty_cache()
-                
+
             pred_flows_f = torch.cat(pred_flows_f, dim=1)
             pred_flows_b = torch.cat(pred_flows_b, dim=1)
             pred_flows_bi = (pred_flows_f, pred_flows_b)
@@ -328,11 +394,10 @@ def inpaint(video_path, mask_path, output_folder):
             pred_flows_bi, _ = fix_flow_complete.forward_bidirect_flow(gt_flows_bi, flow_masks)
             pred_flows_bi = fix_flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, flow_masks)
             torch.cuda.empty_cache()
-            
 
         # ---- image propagation ----
         masked_frames = frames * (1 - masks_dilated)
-        subvideo_length_img_prop = min(100, subvideo_length) # ensure a minimum of 100 frames for image propagation
+        subvideo_length_img_prop = min(100, subvideo_length)  # ensure a minimum of 100 frames for image propagation
         if video_length > subvideo_length_img_prop:
             updated_frames, updated_masks = [], []
             pad_len = 10
@@ -343,29 +408,29 @@ def inpaint(video_path, mask_path, output_folder):
                 pad_len_e = e_f - min(video_length, f + subvideo_length_img_prop)
 
                 b, t, _, _, _ = masks_dilated[:, s_f:e_f].size()
-                pred_flows_bi_sub = (pred_flows_bi[0][:, s_f:e_f-1], pred_flows_bi[1][:, s_f:e_f-1])
-                prop_imgs_sub, updated_local_masks_sub = model.img_propagation(masked_frames[:, s_f:e_f], 
-                                                                       pred_flows_bi_sub, 
-                                                                       masks_dilated[:, s_f:e_f], 
-                                                                       'nearest')
+                pred_flows_bi_sub = (pred_flows_bi[0][:, s_f:e_f - 1], pred_flows_bi[1][:, s_f:e_f - 1])
+                prop_imgs_sub, updated_local_masks_sub = model.img_propagation(masked_frames[:, s_f:e_f],
+                                                                               pred_flows_bi_sub,
+                                                                               masks_dilated[:, s_f:e_f],
+                                                                               'nearest')
                 updated_frames_sub = frames[:, s_f:e_f] * (1 - masks_dilated[:, s_f:e_f]) + \
-                                    prop_imgs_sub.view(b, t, 3, h, w) * masks_dilated[:, s_f:e_f]
+                                     prop_imgs_sub.view(b, t, 3, h, w) * masks_dilated[:, s_f:e_f]
                 updated_masks_sub = updated_local_masks_sub.view(b, t, 1, h, w)
-                
-                updated_frames.append(updated_frames_sub[:, pad_len_s:e_f-s_f-pad_len_e])
-                updated_masks.append(updated_masks_sub[:, pad_len_s:e_f-s_f-pad_len_e])
+
+                updated_frames.append(updated_frames_sub[:, pad_len_s:e_f - s_f - pad_len_e])
+                updated_masks.append(updated_masks_sub[:, pad_len_s:e_f - s_f - pad_len_e])
                 torch.cuda.empty_cache()
-                
+
             updated_frames = torch.cat(updated_frames, dim=1)
             updated_masks = torch.cat(updated_masks, dim=1)
         else:
             b, t, _, _, _ = masks_dilated.size()
-            prop_imgs, updated_local_masks = model.img_propagation(masked_frames, pred_flows_bi, masks_dilated, 'nearest')
+            prop_imgs, updated_local_masks = model.img_propagation(masked_frames, pred_flows_bi, masks_dilated,
+                                                                   'nearest')
             updated_frames = frames * (1 - masks_dilated) + prop_imgs.view(b, t, 3, h, w) * masks_dilated
             updated_masks = updated_local_masks.view(b, t, 1, h, w)
             torch.cuda.empty_cache()
-            
-    
+
     ori_frames = frames_inp
     comp_frames = [None] * video_length
 
@@ -374,26 +439,27 @@ def inpaint(video_path, mask_path, output_folder):
         ref_num = subvideo_length // ref_stride
     else:
         ref_num = -1
-    
+
     # ---- feature propagation + transformer ----
     for f in tqdm(range(0, video_length, neighbor_stride)):
         neighbor_ids = [
             i for i in range(max(0, f - neighbor_stride),
-                                min(video_length, f + neighbor_stride + 1))
+                             min(video_length, f + neighbor_stride + 1))
         ]
         ref_ids = get_ref_index(f, neighbor_ids, video_length, ref_stride, ref_num)
         selected_imgs = updated_frames[:, neighbor_ids + ref_ids, :, :, :]
         selected_masks = masks_dilated[:, neighbor_ids + ref_ids, :, :, :]
         selected_update_masks = updated_masks[:, neighbor_ids + ref_ids, :, :, :]
-        selected_pred_flows_bi = (pred_flows_bi[0][:, neighbor_ids[:-1], :, :, :], pred_flows_bi[1][:, neighbor_ids[:-1], :, :, :])
-        
+        selected_pred_flows_bi = (
+            pred_flows_bi[0][:, neighbor_ids[:-1], :, :, :], pred_flows_bi[1][:, neighbor_ids[:-1], :, :, :])
+
         with torch.no_grad():
             # 1.0 indicates mask
             l_t = len(neighbor_ids)
-            
+
             # pred_img = selected_imgs # results of image propagation
             pred_img = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
-            
+
             pred_img = pred_img.view(-1, 3, h, w)
 
             pred_img = (pred_img + 1) / 2
@@ -403,31 +469,25 @@ def inpaint(video_path, mask_path, output_folder):
             for i in range(len(neighbor_ids)):
                 idx = neighbor_ids[i]
                 img = np.array(pred_img[i]).astype(np.uint8) * binary_masks[i] \
-                    + ori_frames[idx] * (1 - binary_masks[i])
+                      + ori_frames[idx] * (1 - binary_masks[i])
                 if comp_frames[idx] is None:
                     comp_frames[idx] = img
-                else: 
+                else:
                     comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
-                    
-                comp_frames[idx] = comp_frames[idx].astype(np.uint8)
-        
-        torch.cuda.empty_cache()
-                
-    # save each frame
-    for idx in range(video_length):
-        f = comp_frames[idx]
-        f = cv2.resize(f, out_size, interpolation = cv2.INTER_CUBIC)
-        f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-        img_output = os.path.join(output, str(idx).zfill(5)+'.png')
-        imwrite(f, img_output)
-                    
 
-    # if mode == 'video_outpainting':
-    #     comp_frames = [i[10:-10,10:-10] for i in comp_frames]
-    #     masked_frame_for_save = [i[10:-10,10:-10] for i in masked_frame_for_save]
-    
-    # save videos frame
-    # comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
-    # imageio.mimwrite(os.path.join(output, 'inpainted.mp4'), comp_frames, fps=fps, quality=7)
-    
-    torch.cuda.empty_cache()
+                comp_frames[idx] = comp_frames[idx].astype(np.uint8)
+
+        torch.cuda.empty_cache()
+
+    # Compose frames back together and save
+    for idx in range(video_length):
+        crop = comp_frames[idx]
+        frame = out_frames[idx]
+        crop = cv2.resize(crop, out_size, interpolation=cv2.INTER_CUBIC)
+        # crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        crop_img = Image.fromarray(crop)
+        frame.paste(crop_img, top_left)
+        img_output = os.path.join(output, str(idx).zfill(5) + '.png')
+        frame.save(img_output)
+
+torch.cuda.empty_cache()
